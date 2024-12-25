@@ -1,0 +1,561 @@
+% Este texto es solo para mostrar el código detrás de la app aquaprimis.mlapp
+% Ejecutar directamente aquaprimis.mlapp
+
+classdef aquaprimis < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure             matlab.ui.Figure
+        PortDropDown         matlab.ui.control.DropDown
+        PortDropDownLabel    matlab.ui.control.Label
+        LabelDegrees         matlab.ui.control.Label
+        DegreeLabel          matlab.ui.control.Label
+        LabelDistance        matlab.ui.control.Label
+        XLabel               matlab.ui.control.Label
+        LabelPressure        matlab.ui.control.Label
+        barLabel             matlab.ui.control.Label
+        LabelTemperature     matlab.ui.control.Label
+        CLabel               matlab.ui.control.Label
+        PressureGauge        matlab.ui.control.SemicircularGauge
+        PressureGaugeLabel   matlab.ui.control.Label
+        ReadfileSwitch       matlab.ui.control.ToggleSwitch
+        ReadfileSwitchLabel  matlab.ui.control.Label
+        LampRead             matlab.ui.control.Lamp
+        LampSerial           matlab.ui.control.Lamp
+        STARTSwitch          matlab.ui.control.ToggleSwitch
+        STARTSwitchLabel     matlab.ui.control.Label
+        UIAxes               matlab.ui.control.UIAxes
+        UIGTempTime          matlab.ui.control.UIAxes
+        UIGDepthTime         matlab.ui.control.UIAxes
+    end
+
+    
+    properties (Access = public)
+        depth;          % Vector Depth [m]
+        time;           % Vector Time [s]
+        pressure;       % Vector Pressure [bar]
+        temperature;    % Vector Temperature [ºC]
+        distance;       % Vector Distance [cm]
+        radians;        % Degrees TO Radians of Servo [rad]
+        s;              % Serial Port
+        h;              % Animated line for Depth-time graph
+        gain = 147.857;         % Gain = 5 + 80kOhm/Rg, when Rg=560 ohm
+        rate = 5;               % Rate = 5 samples/sec
+        sensibility = 0.02; 	% [V]/[bar]
+        temp_max = 30;          % Maximum temperature of ocean, sea, lake or river
+        dist_max = 400;         % [cm]
+        dist_min = 2;           % [cm]
+        max_samples = 1000;
+        radio=400;              % [cm]
+        stop;                   % True if we need to stop the app, False otherwise
+    end
+    
+    methods (Static)
+        % Measure the size/length of the file
+        function samples_file = maxSamplesFile()
+            file = fopen("resultats.txt",'r');
+            data = textscan(file,'%d %d %d %f',[Inf 4]);
+            col = data{1}; % For example, but it can be another column
+            samples_file = length(col);
+            fclose(file);
+        end
+        
+        %   This function calculates the temperature from temperature sensor
+        function temp = calcTemp(sensorValue)
+             temp = ((sensorValue*5)/1023)*100;   
+                % For LM35DZ, it works from 0º to 100º
+            % temp = ((sensorValue*5)/1023)*100 - 50; 
+                % For TMP36, it works from -50º to 125º
+            %  1ºC/10mV = 1ºC/0.01V  
+            % Output voltage from temperature sensor is in millivolts
+        end
+        
+        %   This function calculates the pressure from pressure sensor
+        function pressure = calcPressure(sensevalue,gain,sensibility)
+            pressure = (((sensevalue*5)/(1023*gain))/sensibility)-1;
+            % Hydrostatic pressure = total pressure -  atmospheric pressure
+        end
+        
+        %   This function calculates the depth.
+        function depth = calcDepth(pressureInBar)
+            depth = pressureInBar*(3/0.3);    % Ph*(3 meters / 0.3 bar)
+            depth(depth<0)=0;                 % If depth is <0, then depth = 0
+        end
+
+    end
+    
+    methods (Access = public)
+        
+        % Initialize values
+        function [t_screen,pressure_max, depth_max] = initialize(app)
+            t_screen = 100/app.rate;    % 20 sec on screen
+            pressure_max = app.calcPressure(1023,app.gain,app.sensibility);
+            depth_max = app.calcDepth(pressure_max);
+            
+            app.time = zeros(1,app.max_samples);
+            app.depth = zeros(1,app.max_samples);
+            app.pressure = zeros(1,app.max_samples);
+            app.temperature = zeros (1,app.max_samples);
+            app.distance = zeros(1,app.max_samples);
+            app.radians = zeros(1,app.max_samples);
+        end
+        
+        % Reading and gathering values
+        function gathering(app, sample, time, data)
+            % Cartesians Axes
+            app.pressure(sample) = app.calcPressure(data(1),app.gain,app.sensibility);
+            app.temperature(sample) = app.calcTemp(data(2));
+            app.depth(sample) = app.calcDepth(app.pressure(sample));
+            app.time(sample) = time;
+            % Gauges
+            app.PressureGauge.Value = app.pressure(sample);
+            % Scatter
+            app.distance(sample) = data(4);
+            app.radians(sample) = deg2rad(data(3));
+            callingLabels(app,sample);
+        end
+        
+        % Print values in labels
+        function callingLabels(app,sample)
+            app.LabelDegrees.Text = num2str(rad2deg(app.radians(sample)),3);
+            app.LabelDistance.Text = num2str(app.distance(sample));
+            app.LabelTemperature.Text = num2str(app.temperature(sample));
+            app.LabelPressure.Text = num2str(app.pressure(sample));
+        end
+        
+        % Drawing live
+        function scatterAxes = drawing(app,animatedline,sample)
+            addpoints(animatedline(1),app.time(sample),app.depth(sample));
+            addpoints(animatedline(2),app.time(sample),app.temperature(sample));
+            scatterAxes = scatter(app.UIAxes,app.distance(sample)*cos(app.radians(sample)),...
+                    app.distance(sample)*sin(app.radians(sample)),200,'filled',"MarkerFaceColor","w");
+            if (app.distance(sample) < app.dist_min) || (app.distance(sample) > app.dist_max) 
+                scatterAxes.Visible = 'Off';
+            end
+            drawnow limitrate
+        end
+        
+        % Modify X Axis
+        function time = variable_time(app,sample,t_screen)
+            time = (sample-1)/app.rate;
+            if mod(sample-1,100) == 0
+                app.UIGDepthTime.XLim = [time (time+t_screen)];
+                app.UIGTempTime.XLim = app.UIGDepthTime.XLim;
+            end
+        end
+        
+        % read Serial, Fill file and Read file
+        function mainFunction(app, IDswitch)
+            global  dc
+            n_samples = 1;
+            
+            [t_screen,~,depth_max]=initialize(app);
+            
+            hAnimatedLine(1) = animatedline(app.UIGDepthTime,'Color','#1f7ef2','LineWidth',3);
+            hAnimatedLine(2) = animatedline(app.UIGTempTime,'Color','#1f7ef2','LineWidth',3);
+            
+            app.UIGDepthTime.YLim = [0 round(depth_max)];
+            app.UIGTempTime.YLim = [0 round(app.temp_max)];
+            
+            switch IDswitch
+                case 1
+                    maxSamples = app.maxSamplesFile();
+                    dc = fopen("resultats.txt",'r');
+                    while (n_samples <= maxSamples) && (app.stop ~= true)
+                        if strcmp(app.ReadfileSwitch.Value,'Off') || n_samples==maxSamples
+                            app.stop=true;
+                            app.ReadfileSwitch.Value = 'Off';
+                            fclose(dc);
+                            break;
+                        end
+                        t = variable_time(app,n_samples,t_screen);
+                        A = fscanf(dc,'%d %d %d %f',[4 1]);
+                        gathering(app,n_samples,t,A');
+                        aux = drawing(app,hAnimatedLine,n_samples);
+                        n_samples = n_samples + 1;
+                        delete(aux);
+                    end
+                case 2
+                    dc = fopen("resultats.txt",'w');
+                    pause(1);
+                    while (n_samples <= app.max_samples) && (app.stop ~= true)
+                        if strcmp(app.STARTSwitch.Value,'Off') || n_samples==app.max_samples
+                            app.stop=1;
+                            app.STARTSwitch.Value = 'Off';
+                            fclose(dc);
+                            delete(app.s);
+                            break;
+                        end
+                        t = variable_time(app,n_samples,t_screen);
+                        do = true;
+                        while do==true
+                            A=readline(app.s); 
+                            str=split(A);
+                            if length(str) == 4
+                                do = false;
+                                data = str2double(str);
+                            end
+                        end
+                        fprintf(dc,'%d\t%d\t%d\t%f\n',data);
+                        gathering(app,n_samples,t,data);
+                        aux = drawing(app,hAnimatedLine,n_samples);
+                        n_samples = n_samples + 1;
+                        delete(aux);
+                    end
+            end
+        end
+        
+        % Draw a semicircle
+        function drawSemiCircle(app)
+            global gridRadioX gridRadioY gridThetaX gridThetaY 
+            % Draw the arcs lines
+            for R=100:100:app.radio
+                k=1;
+                for i=1:1:180
+                    gridRadioX(k)=R*cos(i*pi/180);
+                    gridRadioY(k)=R*sin(i*pi/180);
+                    k=k+1;
+                end
+                plot(app.UIAxes,gridRadioX,gridRadioY,'color','#139fff','LineWidth',2);
+                hold(app.UIAxes,"on");
+            end
+            % Draw the grid lines
+            for theta=0:30:180
+                for i=100:100:app.radio
+                    gridThetaX(i)=i*cos(theta*pi/180);
+                    gridThetaY(i)=i*sin(theta*pi/180);
+                end
+                plot(app.UIAxes,0,0,gridThetaX,gridThetaY,'color','#139fff','LineWidth',2);
+                hold(app.UIAxes,"on");
+            end
+            labels = cellstr(num2str([0:30:180]'));
+            text(app.UIAxes,[380;345;190;-10;-210;-355;-395], ...
+                [10;200;350;400;350;200;10],labels,"Color",'white',"BackgroundColor",'b');
+        end     
+        
+        % This function reset UIAxes and label text
+        function cleaning(app)
+            cla(app.UIGDepthTime);
+            cla(app.UIGTempTime);
+            cla(app.UIAxes);
+            
+            app.LabelDegrees.Text = " ";
+            app.LabelDistance.Text = " ";
+            app.LabelTemperature.Text = " ";
+            app.LabelPressure.Text = " ";
+        end
+       
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function startupFcn(app)
+            drawSemiCircle(app);
+            app.PortDropDown.Enable = false;
+            app.PortDropDown.Items = " ";
+            app.stop=false;
+            delete(instrfind);
+        end
+
+        % Value changed function: ReadfileSwitch
+        function ReadfileSwitchValueChanged(app, event)
+            value = app.ReadfileSwitch.Value;
+            if strcmp(value,'On')
+                app.LampRead.Color = "green";
+                startupFcn(app);
+                mainFunction(app,1);
+            elseif strcmp(value,'Off') || app.stop==true
+                app.LampRead.Color = "red";
+                cleaning(app);
+            end    
+        end
+
+        % Value changed function: STARTSwitch
+        function STARTSwitchValueChanged(app, event)
+            value = app.STARTSwitch.Value;
+            if strcmp(value,'On')
+                app.LampSerial.Color = "green";
+                app.PortDropDown.Enable = true;
+                app.PortDropDown.Items=serialportlist;
+                PortDropDownValueChanged(app,event);
+                mainFunction(app,2);
+            elseif strcmp(value,'Off') || app.stop==true
+                app.LampSerial.Color = "red";
+                app.PortDropDown.Enable = false;
+                cleaning(app);
+                delete(instrfind); instrfind;
+                app.PortDropDown.Items=serialportlist;
+            end
+        
+        end
+
+        % Value changed function: PortDropDown
+        function PortDropDownValueChanged(app, event)
+            value = app.PortDropDown.Value;
+            instrfind;
+            app.s = serialport(value,9600);
+            configureTerminator(app.s,"CR/LF");
+            flush(app.s);
+            startupFcn(app);
+            main(app,2);
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.Color = [0 0 0];
+            app.UIFigure.Position = [100 100 1499 894];
+            app.UIFigure.Name = 'MATLAB App';
+
+            % Create UIGDepthTime
+            app.UIGDepthTime = uiaxes(app.UIFigure);
+            title(app.UIGDepthTime, 'Depth[m] and Time[s]')
+            xlabel(app.UIGDepthTime, 'Time[s]')
+            ylabel(app.UIGDepthTime, 'Depth[m]')
+            app.UIGDepthTime.DataAspectRatio = [0.459641255605381 1 1];
+            app.UIGDepthTime.PlotBoxAspectRatio = [43.5121951219512 7 1];
+            app.UIGDepthTime.XLim = [0 20];
+            app.UIGDepthTime.YLim = [0 7];
+            app.UIGDepthTime.XColor = [0.0745 0.6235 1];
+            app.UIGDepthTime.XTickLabelRotation = 0;
+            app.UIGDepthTime.YColor = [0.0745 0.6235 1];
+            app.UIGDepthTime.YTickLabelRotation = 0;
+            app.UIGDepthTime.ZTickLabelRotation = 0;
+            app.UIGDepthTime.BoxStyle = 'full';
+            app.UIGDepthTime.Color = [0 0 0];
+            app.UIGDepthTime.ClippingStyle = 'rectangle';
+            app.UIGDepthTime.GridColor = [0.0588 1 1];
+            app.UIGDepthTime.MinorGridColor = [0 1 1];
+            app.UIGDepthTime.GridAlpha = 0.2;
+            app.UIGDepthTime.MinorGridAlpha = 0.2;
+            app.UIGDepthTime.XGrid = 'on';
+            app.UIGDepthTime.XMinorGrid = 'on';
+            app.UIGDepthTime.YGrid = 'on';
+            app.UIGDepthTime.YMinorGrid = 'on';
+            app.UIGDepthTime.Position = [111 27 1290 258];
+
+            % Create UIGTempTime
+            app.UIGTempTime = uiaxes(app.UIFigure);
+            title(app.UIGTempTime, 'Temperature [ºC] and Time [s]')
+            xlabel(app.UIGTempTime, 'Time [s]')
+            ylabel(app.UIGTempTime, 'Temperature [ºC]')
+            app.UIGTempTime.AmbientLightColor = 'none';
+            app.UIGTempTime.DataAspectRatio = [0.459641255605381 1 1];
+            app.UIGTempTime.PlotBoxAspectRatio = [43.5121951219512 30 1];
+            app.UIGTempTime.XLim = [0 20];
+            app.UIGTempTime.YLim = [0 30];
+            app.UIGTempTime.XColor = [0.0745 0.6235 1];
+            app.UIGTempTime.XTickLabelRotation = 0;
+            app.UIGTempTime.YColor = [0.0745 0.6235 1];
+            app.UIGTempTime.YTickLabelRotation = 0;
+            app.UIGTempTime.ZTickLabelRotation = 0;
+            app.UIGTempTime.Color = [0 0 0];
+            app.UIGTempTime.GridColor = [0 1 1];
+            app.UIGTempTime.MinorGridColor = [0 1 1];
+            app.UIGTempTime.GridAlpha = 0.2;
+            app.UIGTempTime.MinorGridAlpha = 0.2;
+            app.UIGTempTime.XGrid = 'on';
+            app.UIGTempTime.XMinorGrid = 'on';
+            app.UIGTempTime.YGrid = 'on';
+            app.UIGTempTime.YMinorGrid = 'on';
+            app.UIGTempTime.FontSize = 14;
+            app.UIGTempTime.Position = [11 306 435 345];
+
+            % Create UIAxes
+            app.UIAxes = uiaxes(app.UIFigure);
+            xlabel(app.UIAxes, 'Distance')
+            ylabel(app.UIAxes, 'Degrees')
+            app.UIAxes.PlotBoxAspectRatio = [1.87353629976581 1 1];
+            app.UIAxes.XLim = [-400 400];
+            app.UIAxes.YLim = [0 400];
+            app.UIAxes.XColor = [0.0745 0.6235 1];
+            app.UIAxes.XTickLabelRotation = 0;
+            app.UIAxes.YColor = [0 0 0];
+            app.UIAxes.YTickLabelRotation = 0;
+            app.UIAxes.ZTickLabelRotation = 0;
+            app.UIAxes.Color = [0 0 0];
+            app.UIAxes.Position = [625 326 853 469];
+
+            % Create STARTSwitchLabel
+            app.STARTSwitchLabel = uilabel(app.UIFigure);
+            app.STARTSwitchLabel.HorizontalAlignment = 'center';
+            app.STARTSwitchLabel.FontWeight = 'bold';
+            app.STARTSwitchLabel.FontColor = [1 1 1];
+            app.STARTSwitchLabel.Position = [135 678 45 22];
+            app.STARTSwitchLabel.Text = 'START';
+
+            % Create STARTSwitch
+            app.STARTSwitch = uiswitch(app.UIFigure, 'toggle');
+            app.STARTSwitch.ValueChangedFcn = createCallbackFcn(app, @STARTSwitchValueChanged, true);
+            app.STARTSwitch.FontWeight = 'bold';
+            app.STARTSwitch.FontColor = [1 1 1];
+            app.STARTSwitch.Position = [146 736 20 45];
+
+            % Create LampSerial
+            app.LampSerial = uilamp(app.UIFigure);
+            app.LampSerial.Position = [147 813 20 20];
+            app.LampSerial.Color = [1 0 0];
+
+            % Create LampRead
+            app.LampRead = uilamp(app.UIFigure);
+            app.LampRead.Position = [246 813 20 20];
+            app.LampRead.Color = [1 0 0];
+
+            % Create ReadfileSwitchLabel
+            app.ReadfileSwitchLabel = uilabel(app.UIFigure);
+            app.ReadfileSwitchLabel.HorizontalAlignment = 'center';
+            app.ReadfileSwitchLabel.FontWeight = 'bold';
+            app.ReadfileSwitchLabel.FontColor = [1 1 1];
+            app.ReadfileSwitchLabel.Position = [229 678 56 22];
+            app.ReadfileSwitchLabel.Text = 'Read file';
+
+            % Create ReadfileSwitch
+            app.ReadfileSwitch = uiswitch(app.UIFigure, 'toggle');
+            app.ReadfileSwitch.ValueChangedFcn = createCallbackFcn(app, @ReadfileSwitchValueChanged, true);
+            app.ReadfileSwitch.FontWeight = 'bold';
+            app.ReadfileSwitch.FontColor = [1 1 1];
+            app.ReadfileSwitch.Position = [246 736 20 45];
+
+            % Create PressureGaugeLabel
+            app.PressureGaugeLabel = uilabel(app.UIFigure);
+            app.PressureGaugeLabel.BackgroundColor = [0 0 0];
+            app.PressureGaugeLabel.HorizontalAlignment = 'center';
+            app.PressureGaugeLabel.FontSize = 20;
+            app.PressureGaugeLabel.FontWeight = 'bold';
+            app.PressureGaugeLabel.FontColor = [0 0.4471 0.7412];
+            app.PressureGaugeLabel.Position = [491 326 91 24];
+            app.PressureGaugeLabel.Text = 'Pressure';
+
+            % Create PressureGauge
+            app.PressureGauge = uigauge(app.UIFigure, 'semicircular');
+            app.PressureGauge.Limits = [0 1];
+            app.PressureGauge.BackgroundColor = [0 0 0];
+            app.PressureGauge.ScaleColors = [0.6353 0.0784 0.1843;1 0 0;0.9608 0.4353 0.0588;0.8157 1 0.0784;0.4902 0.8588 0.1647;0.1137 0.6784 0.2275];
+            app.PressureGauge.ScaleColorLimits = [0.85 1;0 0.85;0.55 0.7;0.4 0.55;0.25 0.4;0 0.25];
+            app.PressureGauge.FontWeight = 'bold';
+            app.PressureGauge.FontColor = [0 0.4471 0.7412];
+            app.PressureGauge.Position = [463 365 146 79];
+
+            % Create CLabel
+            app.CLabel = uilabel(app.UIFigure);
+            app.CLabel.BackgroundColor = [0 0 0];
+            app.CLabel.FontWeight = 'bold';
+            app.CLabel.FontColor = [0.0745 0.6235 1];
+            app.CLabel.Position = [552 467 25 22];
+            app.CLabel.Text = ' ºC';
+
+            % Create LabelTemperature
+            app.LabelTemperature = uilabel(app.UIFigure);
+            app.LabelTemperature.BackgroundColor = [0 0 0];
+            app.LabelTemperature.FontColor = [0.0745 0.6235 1];
+            app.LabelTemperature.Position = [491 467 62 22];
+            app.LabelTemperature.Text = '';
+
+            % Create barLabel
+            app.barLabel = uilabel(app.UIFigure);
+            app.barLabel.BackgroundColor = [0 0 0];
+            app.barLabel.FontWeight = 'bold';
+            app.barLabel.FontColor = [0.0745 0.6235 1];
+            app.barLabel.Position = [552 293 30 22];
+            app.barLabel.Text = 'bar';
+
+            % Create LabelPressure
+            app.LabelPressure = uilabel(app.UIFigure);
+            app.LabelPressure.BackgroundColor = [0 0 0];
+            app.LabelPressure.FontColor = [0.0745 0.6235 1];
+            app.LabelPressure.Position = [491 293 62 22];
+            app.LabelPressure.Text = '';
+
+            % Create XLabel
+            app.XLabel = uilabel(app.UIFigure);
+            app.XLabel.FontSize = 14;
+            app.XLabel.FontWeight = 'bold';
+            app.XLabel.FontColor = [0.0745 0.6235 1];
+            app.XLabel.Position = [696 812 25 22];
+            app.XLabel.Text = 'X:';
+
+            % Create LabelDistance
+            app.LabelDistance = uilabel(app.UIFigure);
+            app.LabelDistance.BackgroundColor = [0 0 0];
+            app.LabelDistance.FontSize = 14;
+            app.LabelDistance.FontWeight = 'bold';
+            app.LabelDistance.FontColor = [0.0745 0.6235 1];
+            app.LabelDistance.Position = [720 812 63 22];
+            app.LabelDistance.Text = '';
+
+            % Create DegreeLabel
+            app.DegreeLabel = uilabel(app.UIFigure);
+            app.DegreeLabel.FontSize = 14;
+            app.DegreeLabel.FontWeight = 'bold';
+            app.DegreeLabel.FontColor = [0.0745 0.6235 1];
+            app.DegreeLabel.Position = [797 812 58 22];
+            app.DegreeLabel.Text = 'Degree:';
+
+            % Create LabelDegrees
+            app.LabelDegrees = uilabel(app.UIFigure);
+            app.LabelDegrees.BackgroundColor = [0 0 0];
+            app.LabelDegrees.FontSize = 14;
+            app.LabelDegrees.FontWeight = 'bold';
+            app.LabelDegrees.FontColor = [0.0745 0.6235 1];
+            app.LabelDegrees.Position = [854 812 70 22];
+            app.LabelDegrees.Text = '';
+
+            % Create PortDropDownLabel
+            app.PortDropDownLabel = uilabel(app.UIFigure);
+            app.PortDropDownLabel.BackgroundColor = [0 0 0];
+            app.PortDropDownLabel.HorizontalAlignment = 'center';
+            app.PortDropDownLabel.FontWeight = 'bold';
+            app.PortDropDownLabel.FontColor = [1 1 1];
+            app.PortDropDownLabel.Position = [92 642 29 22];
+            app.PortDropDownLabel.Text = 'Port';
+
+            % Create PortDropDown
+            app.PortDropDown = uidropdown(app.UIFigure);
+            app.PortDropDown.Items = {};
+            app.PortDropDown.ValueChangedFcn = createCallbackFcn(app, @PortDropDownValueChanged, true);
+            app.PortDropDown.BackgroundColor = [1 1 1];
+            app.PortDropDown.Position = [135 642 75 22];
+            app.PortDropDown.Value = {};
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = aquaprimis
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            % Execute the startup function
+            runStartupFcn(app, @startupFcn)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
